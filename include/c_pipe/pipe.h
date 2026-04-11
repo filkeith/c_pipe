@@ -24,6 +24,12 @@
  * @endcode
  */
 
+
+/** @brief Return codes for @ref Reader.read and @ref Writer.write. */
+#define PIPE_OK    0   /**< Success. */
+#define PIPE_EOF   1   /**< End of data, normal termination. */
+#define PIPE_ERR  -1   /**< Error, pipeline should be cancelled. */
+
 /* -------------------------------------------------------------------------
  * Reader / Writer interfaces
  * ---------------------------------------------------------------------- */

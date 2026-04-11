@@ -1,3 +1,5 @@
+#include "c_pipe/pipe.h"
+
 #include <stdlib.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -5,35 +7,6 @@
 #include "../include/c_pipe/chan.h"
 
 #define CHANNEL_SIZE 64
-
-/** @brief Return codes for @ref Reader.read and @ref Writer.write. */
-#define PIPE_OK    0   /**< Success. */
-#define PIPE_EOF   1   /**< End of data, normal termination. */
-#define PIPE_ERR  -1   /**< Error, pipeline should be cancelled. */
-
-/**
- * @brief Abstract reader interface.
- *
- * Implementations provide a @c read function that produces items one at a time
- * and a @c close function to release underlying resources.
- */
-// Interface for reader.
-typedef struct {
-    int (*read)(void **data);  /**< @brief Read one item into @p *data. Returns 0 on success, non-zero on EOF/error. */
-    int (*close)();            /**< @brief Release resources held by the reader. */
-} Reader;
-
-/**
- * @brief Abstract writer interface.
- *
- * Implementations provide a @c write function that consumes items one at a time
- * and a @c close function to flush and release underlying resources.
- */
-// Interface for writer.
-typedef struct {
-    int (*write)(void **data); /**< @brief Write one item from @p *data. Returns 0 on success, non-zero on error. */
-    int (*close)();            /**< @brief Flush and release resources held by the writer. */
-} Writer;
 
 /**
  * @brief Binds a @ref Reader to an output @ref Channel and runs it on a thread.
@@ -210,7 +183,7 @@ static void *write_chain_run(void *arg) {
  * the whole pipeline.
  */
 // Main pipeline definition.
-typedef struct {
+struct Pipe {
     ReadChain **readers_chain;            /**< @brief Array of reader chain wrappers. */
     size_t readers_count;                 /**< @brief Total number of readers requested. */
     size_t readers_created;              /**< @brief Number of reader chains successfully initialised (used for partial cleanup). */
@@ -225,7 +198,7 @@ typedef struct {
 
     // If at least one chain fails, we exit others.
     atomic_int cancelled;                 /**< @brief Shared cancellation flag; set to 1 by any failing chain. */
-} Pipe;
+};
 
 /**
  * @brief Destroys a @ref Pipe and releases all associated resources.

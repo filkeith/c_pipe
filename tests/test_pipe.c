@@ -9,10 +9,6 @@
 #define MESSAGE_COUNT 10
 #define PARALLEL      3
 
-#define PIPE_OK    0
-#define PIPE_EOF   1
-#define PIPE_ERR  -1
-
 // Global test state
 static atomic_int g_read_index;
 static atomic_int g_read_limit;
