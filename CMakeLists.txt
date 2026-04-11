@@ -19,9 +19,13 @@ add_executable(c_pipe src/main.c src/pipe.c)
 target_link_libraries(c_pipe PRIVATE channel)
 
 # Tests.
-add_executable(tests tests/test_chan.c)
-target_link_libraries(tests PRIVATE channel unity pthread)
+add_executable(chan_tests tests/test_chan.c)
+target_link_libraries(chan_tests PRIVATE channel unity pthread)
+add_executable(pipe_tests tests/test_pipe.c src/pipe.c)
+target_link_libraries(pipe_tests PRIVATE channel unity pthread)
 
 # Timeouts for tests not to hang.
-add_test(NAME chan_tests COMMAND tests)
+add_test(NAME chan_tests COMMAND chan_tests)
 set_tests_properties(chan_tests PROPERTIES TIMEOUT 10)
+add_test(NAME pipe_tests COMMAND pipe_tests)
+set_tests_properties(pipe_tests PROPERTIES TIMEOUT 10)
