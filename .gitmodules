@@ -1,0 +1,6 @@
+[submodule "vendor/aerospike-client-c"]
+	path = vendor/aerospike-client-c
+	url = https://github.com/aerospike/aerospike-client-c
+[submodule "vendor/Unity"]
+	path = vendor/Unity
+	url = https://github.com/ThrowTheSwitch/Unity

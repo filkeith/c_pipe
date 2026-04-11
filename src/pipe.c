@@ -4,7 +4,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
-#include "../include/c_pipe/chan.h"
+#include "c_pipe/chan.h"
 
 #define CHANNEL_SIZE 64
 
@@ -32,9 +32,7 @@ typedef struct {
 // Create new chain for reader.
 ReadChain *read_chain_new(Reader *reader, Channel *output, atomic_int *cancelled) {
     ReadChain *rc = malloc(sizeof(ReadChain));
-    if (rc == NULL) {
-        return NULL;
-    }
+    if (rc == NULL) return NULL;
 
     rc->reader = reader;
     rc->output = output;
@@ -114,9 +112,7 @@ typedef struct {
 // Create new chain for writer.
 WriteChain *write_chain_new(Writer *writer, Channel *input, atomic_int *cancelled) {
     WriteChain *wc = malloc(sizeof(WriteChain));
-    if (wc == NULL) {
-        return NULL;
-    }
+    if (wc == NULL) return NULL;
 
     wc->writer = writer;
     wc->input = input;
@@ -255,29 +251,21 @@ void pipe_destroy(Pipe *pipe) {
  * @note The caller must eventually call @ref pipe_destroy to free all resources.
  */
 Pipe *pipe_new(Reader *readers, size_t readers_count, Writer *writers, size_t writers_count) {
-    if (readers_count == 0 || writers_count == 0) {
-        return NULL;
-    }
+    if (readers_count == 0 || writers_count == 0) return NULL;
 
     // Allocate pipe with 0 values.
     Pipe *pipe = calloc(1, sizeof(Pipe));
-    if (pipe == NULL) {
-        return NULL;
-    }
+    if (pipe == NULL) return NULL;
 
     pipe->readers_count = readers_count;
     pipe->writers_count = writers_count;
     atomic_init(&pipe->cancelled, 0);
 
     pipe->readers_chain = malloc(sizeof(ReadChain *) * readers_count);
-    if (pipe->readers_chain == NULL) {
-        goto cleanup;
-    }
+    if (pipe->readers_chain == NULL) goto cleanup;
 
     pipe->writers_chain = malloc(sizeof(WriteChain *) * writers_count);
-    if (pipe->writers_chain == NULL) {
-        goto cleanup;
-    }
+    if (pipe->writers_chain == NULL) goto cleanup;
 
     // Calculate the number of channels.
     if (readers_count == writers_count) {
@@ -287,9 +275,7 @@ Pipe *pipe_new(Reader *readers, size_t readers_count, Writer *writers, size_t wr
     }
 
     pipe->chans = malloc(sizeof(Channel *) * pipe->chans_count);
-    if (pipe->chans == NULL) {
-        goto cleanup;
-    }
+    if (pipe->chans == NULL) goto cleanup;
 
     // Init channels.
     if (readers_count == writers_count) {
@@ -297,51 +283,45 @@ Pipe *pipe_new(Reader *readers, size_t readers_count, Writer *writers, size_t wr
         for (size_t i = 0; i < readers_count; i++) {
             // Channel.
             Channel *ch = channel_new(CHANNEL_SIZE);
-            if (ch == NULL) {
-                goto cleanup;
-            }
+            if (ch == NULL) goto cleanup;
+
             pipe->chans[i] = ch;
             pipe->chans_created++;
 
             // Reader.
             ReadChain *rc = read_chain_new(&readers[i], pipe->chans[i], &pipe->cancelled);
-            if (rc == NULL) {
-                goto cleanup;
-            }
+            if (rc == NULL) goto cleanup;
+
             pipe->readers_chain[i] = rc;
             pipe->readers_created++;
 
             // Writer.
             WriteChain *wc = write_chain_new(&writers[i], pipe->chans[i], &pipe->cancelled);
-            if (wc == NULL) {
-                goto cleanup;
-            }
+            if (wc == NULL) goto cleanup;
+
             pipe->writers_chain[i] = wc;
             pipe->writers_created++;
         }
     } else {
         Channel *ch = channel_new(CHANNEL_SIZE);
-        if (ch == NULL) {
-            goto cleanup;
-        }
+        if (ch == NULL) goto cleanup;
+
         pipe->chans[0] = ch;
         pipe->chans_created++;
 
         // Set readers in a loop.
         for (size_t i = 0; i < readers_count; i++) {
             ReadChain *rc = read_chain_new(&readers[i], pipe->chans[0], &pipe->cancelled);
-            if (rc == NULL) {
-                goto cleanup;
-            }
+            if (rc == NULL) goto cleanup;
+
             pipe->readers_chain[i] = rc;
             pipe->readers_created++;
         }
         // Set writers in a loop.
         for (size_t i = 0; i < writers_count; i++) {
             WriteChain *wc = write_chain_new(&writers[i], pipe->chans[0], &pipe->cancelled);
-            if (wc == NULL) {
-                goto cleanup;
-            }
+            if (wc == NULL) goto cleanup;
+
             pipe->writers_chain[i] = wc;
             pipe->writers_created++;
         }
@@ -383,24 +363,18 @@ int pipe_run(Pipe *pipe) {
 
     // Start workers, writers then readers.
     for (size_t i = 0; i < pipe->writers_count; i++) {
-        if (pthread_create(&write_threads[i], NULL, write_chain_run, pipe->writers_chain[i]) != 0) {
-            goto cleanup;
-        }
+        if (pthread_create(&write_threads[i], NULL, write_chain_run, pipe->writers_chain[i]) != 0) goto cleanup;
         writers_started++;
     }
 
     for (size_t i = 0; i < pipe->readers_count; i++) {
-        if (pthread_create(&read_threads[i], NULL, read_chain_run, pipe->readers_chain[i]) != 0) {
-            goto cleanup;
-        }
+        if (pthread_create(&read_threads[i], NULL, read_chain_run, pipe->readers_chain[i]) != 0) goto cleanup;
         readers_started++;
     }
 
     // Wait for workers.
     for (size_t i = 0; i < pipe->readers_count; i++) {
-        if (pthread_join(read_threads[i], NULL) != 0) {
-            goto cleanup;
-        }
+        if (pthread_join(read_threads[i], NULL) != 0) goto cleanup;
     }
 
     // Close channels.
@@ -409,9 +383,7 @@ int pipe_run(Pipe *pipe) {
     }
 
     for (size_t i = 0; i < pipe->writers_count; i++) {
-        if (pthread_join(write_threads[i], NULL) != 0) {
-            goto cleanup;
-        }
+        if (pthread_join(write_threads[i], NULL) != 0) goto cleanup;
     }
 
     return 0;

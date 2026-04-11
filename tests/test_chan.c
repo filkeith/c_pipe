@@ -1,8 +1,8 @@
 #include <stdlib.h>
 #include <pthread.h>
 
-#include "../vendor/Unity/src/unity.h"
-#include "../include/c_pipe/chan.h"
+#include "unity.h"
+#include "c_pipe/chan.h"
 
 // Run before each test.
 void setUp(void) {}

@@ -1,8 +1,8 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 
-#include "../vendor/Unity/src/unity.h"
-#include "../include/c_pipe/pipe.h"
+#include "unity.h"
+#include "c_pipe/pipe.h"
 
 // Utils for test.
 

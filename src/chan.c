@@ -3,7 +3,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 
-#include "../include/c_pipe/chan.h"
+#include "c_pipe/chan.h"
 
 /**
  * @brief Thread-safe bounded channel (queue) backed by a ring buffer.
@@ -45,40 +45,28 @@ struct Channel {
  */
 Channel *channel_new(const size_t size) {
     // Validation.
-    if (size == 0) {
-        return NULL;
-    }
+    if (size == 0) return NULL;
 
     // Create new chan with zero vals.
     Channel *chan = calloc(1, sizeof(Channel));
-    if (chan == NULL) {
-        return NULL;
-    }
+    if (chan == NULL) return NULL;
 
     // Init buffer.
     chan->buf = (void **) malloc(sizeof(void *) * size);
-    if (chan->buf == NULL) {
-        goto cleanup_chan;
-    }
+    if (chan->buf == NULL) goto cleanup_chan;
 
     // Set size.
     chan->size = size;
 
     // Init sync primitives.
     int ec = pthread_mutex_init(&chan->mu, NULL);
-    if (ec != 0) {
-        goto cleanup_buf;
-    }
+    if (ec != 0) goto cleanup_buf;
 
     ec = pthread_cond_init(&chan->not_empty, NULL);
-    if (ec != 0) {
-        goto cleanup_mutex;
-    }
+    if (ec != 0) goto cleanup_mutex;
 
     ec = pthread_cond_init(&chan->not_full, NULL);
-    if (ec != 0) {
-        goto cleanup_cond_empty;
-    }
+    if (ec != 0) goto cleanup_cond_empty;
 
     return chan;
 
