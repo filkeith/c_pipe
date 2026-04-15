@@ -15,6 +15,8 @@
  *
  * Typical usage:
  * @code
+ *   my_ctx_t ctx = { ... };
+ *
  *   Reader readers[2] = { {my_read, my_close}, {my_read, my_close} };
  *   Writer writers[2] = { {my_write, my_close}, {my_write, my_close} };
  *
@@ -24,11 +26,10 @@
  * @endcode
  */
 
-
-/** @brief Return codes for @ref Reader.read and @ref Writer.write. */
-#define PIPE_OK    0   /**< Success. */
-#define PIPE_EOF   1   /**< End of data, normal termination. */
-#define PIPE_ERR  -1   /**< Error, pipeline should be cancelled. */
+/** @brief Return codes for @ref Reader and @ref Writer function pointers. */
+#define PIPE_OK   (0)   /**< Success, item produced/consumed. */
+#define PIPE_EOF  (1)   /**< End of data, normal termination. */
+#define PIPE_ERR  (-1)  /**< Unrecoverable error, pipeline will be cancelled. */
 
 /* -------------------------------------------------------------------------
  * Reader / Writer interfaces
@@ -37,46 +38,80 @@
 /**
  * @brief Abstract reader interface.
  *
- * The caller supplies concrete function pointers. @c read produces one item
- * per call; @c close releases any underlying resources (file, socket, etc.).
+ * The caller supplies concrete function pointers and an execution context.
+ * @c read produces one item per call; @c close releases underlying resources.
+ *
+ * @note @p ctx is owned and managed entirely by the caller. The pipeline
+ *       passes it through opaquely and never frees it.
  */
 typedef struct {
     /**
      * @brief Produce one item.
      *
-     * @param[out] data  Set to a heap-allocated pointer owned by the caller
-     *                   after a successful read.
-     * @return  @c 0 on success, non-zero on EOF or error.
+     * @param[in]  ctx   Caller-supplied execution context (e.g. database
+     *                   connection, file handle). May be @c NULL if the
+     *                   implementation does not require one.
+     * @param[out] data  Set to a heap-allocated pointer on success.
+     *                   Ownership transfers to the pipeline; the pipeline
+     *                   passes it to a @ref Writer which is responsible
+     *                   for freeing it.
+     * @return  @c PIPE_OK   item produced successfully.
+     * @return  @c PIPE_EOF  no more items, normal termination.
+     * @return  @c PIPE_ERR  unrecoverable error, pipeline will be cancelled.
      */
-    int (*read)(void **data);
+    int (*read)(void *ctx, void **data);
 
     /**
      * @brief Release resources held by the reader.
+     *
+     * Called once by the pipeline after @c read returns @c PIPE_EOF or
+     * @c PIPE_ERR, or when the pipeline is cancelled. The implementation
+     * should close file handles, connections, etc.
+     *
+     * @param[in] ctx  Same context pointer passed to @c read.
      * @return  @c 0 on success, non-zero on error.
      */
-    int (*close)();
+    int (*close)(void *ctx);
+    /**< @brief Caller-supplied context passed to @c read and @c close. May be @c NULL. */
+    void *ctx;
 } Reader;
 
 /**
  * @brief Abstract writer interface.
  *
- * The caller supplies concrete function pointers. @c write consumes one item
- * per call; @c close flushes and releases any underlying resources.
+ * The caller supplies concrete function pointers and an execution context.
+ * @c write consumes one item per call; @c close flushes and releases resources.
+ *
+ * @note @p ctx is owned and managed entirely by the caller. The pipeline
+ *       passes it through opaquely and never frees it.
  */
 typedef struct {
     /**
      * @brief Consume one item.
      *
-     * @param[in] data  Pointer to the item to write.
-     * @return  @c 0 on success, non-zero on error.
+     * The writer is responsible for freeing @p *data after processing,
+     * regardless of success or failure.
+     *
+     * @param[in]     ctx   Caller-supplied execution context. May be @c NULL.
+     * @param[in,out] data  Pointer to the item to consume. The writer must
+     *                      free the underlying allocation before returning.
+     * @return  @c PIPE_OK   item consumed successfully.
+     * @return  @c PIPE_ERR  unrecoverable error, pipeline will be cancelled.
      */
-    int (*write)(void **data);
+    int (*write)(void *ctx, void **data);
 
     /**
      * @brief Flush and release resources held by the writer.
+     *
+     * Called once after the input channel is drained or the pipeline is
+     * cancelled. The implementation should flush buffers and close handles.
+     *
+     * @param[in] ctx  Same context pointer passed to @c write.
      * @return  @c 0 on success, non-zero on error.
      */
-    int (*close)();
+    int (*close)(void *ctx);
+    /**< @brief Caller-supplied context passed to @c write and @c close. May be @c NULL. */
+    void *ctx;
 } Writer;
 
 /* -------------------------------------------------------------------------

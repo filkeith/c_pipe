@@ -27,7 +27,7 @@ void setUp(void) {
 void tearDown(void) {}
 
 // Reader for tests.
-static int test_read(void **data) {
+static int test_read(void *ctx, void **data) {
     int idx = atomic_fetch_add(&g_read_index, 1);
     if (idx >= atomic_load(&g_read_limit)) {
         return PIPE_EOF; // EOF
@@ -45,8 +45,8 @@ static int test_read(void **data) {
     return PIPE_OK;
 }
 
-// Writer fo4r tests.
-static int test_write(void **data) {
+// Writer for tests.
+static int test_write(void *ctx, void **data) {
     int val = *(int *)*data;
     free(*data);
 
@@ -56,7 +56,7 @@ static int test_write(void **data) {
     return PIPE_OK;
 }
 
-static int test_close_noop(void) { return 0; }
+static int test_close_noop(void *ctx) { return 0; }
 
 
 // Calc checksum.
@@ -66,22 +66,22 @@ static int expected_checksum(int n) {
 
 // pipe_new returns NULL when readers_count == 0.
 void test_pipe_new_null_on_zero_readers(void) {
-    Writer w = { test_write, test_close_noop };
+    Writer w = { test_write, test_close_noop, NULL };
     Pipe *p = pipe_new(NULL, 0, &w, 1);
     TEST_ASSERT_NULL(p);
 }
 
 // pipe_new returns NULL when writers_count == 0.
 void test_pipe_new_null_on_zero_writers(void) {
-    Reader r = { test_read, test_close_noop };
+    Reader r = { test_read, test_close_noop, NULL };
     Pipe *p = pipe_new(&r, 1, NULL, 0);
     TEST_ASSERT_NULL(p);
 }
 
 // pipe_new returns valid pointer for correct arguments.
 void test_pipe_new_not_null(void) {
-    Reader r = { test_read, test_close_noop };
-    Writer w = { test_write, test_close_noop };
+    Reader r = { test_read, test_close_noop, NULL };
+    Writer w = { test_write, test_close_noop, NULL };
 
     Pipe *p = pipe_new(&r, 1, &w, 1);
     TEST_ASSERT_NOT_NULL(p);
@@ -91,8 +91,8 @@ void test_pipe_new_not_null(void) {
 
 // One reader to one writer.
 void test_pipe_run_single(void) {
-    Reader r = { test_read, test_close_noop };
-    Writer w = { test_write, test_close_noop };
+    Reader r = { test_read, test_close_noop, NULL };
+    Writer w = { test_write, test_close_noop, NULL };
 
     Pipe *p = pipe_new(&r, 1, &w, 1);
     TEST_ASSERT_NOT_NULL(p);
@@ -116,8 +116,8 @@ void test_pipe_run_multi_paired(void) {
     Reader readers[PARALLEL];
     Writer writers[PARALLEL];
     for (int i = 0; i < PARALLEL; i++) {
-        readers[i] = (Reader){ test_read, test_close_noop };
-        writers[i] = (Writer){ test_write, test_close_noop };
+        readers[i] = (Reader){ test_read, test_close_noop, NULL };
+        writers[i] = (Writer){ test_write, test_close_noop, NULL };
     }
 
     Pipe *p = pipe_new(readers, PARALLEL, writers, PARALLEL);
@@ -138,9 +138,9 @@ void test_pipe_run_fan_in(void) {
 
     Reader readers[PARALLEL];
     for (int i = 0; i < PARALLEL; i++) {
-        readers[i] = (Reader){ test_read, test_close_noop };
+        readers[i] = (Reader){ test_read, test_close_noop, NULL };
     }
-    Writer w = { test_write, test_close_noop };
+    Writer w = { test_write, test_close_noop, NULL };
 
     Pipe *p = pipe_new(readers, PARALLEL, &w, 1);
     TEST_ASSERT_NOT_NULL(p);
@@ -155,11 +155,11 @@ void test_pipe_run_fan_in(void) {
 
 // One reader to PARALLEL writers.
 void test_pipe_run_fan_out(void) {
-    Reader r = { test_read, test_close_noop };
+    Reader r = { test_read, test_close_noop, NULL };
 
     Writer writers[PARALLEL];
     for (int i = 0; i < PARALLEL; i++) {
-        writers[i] = (Writer){ test_write, test_close_noop };
+        writers[i] = (Writer){ test_write, test_close_noop, NULL };
     }
 
     Pipe *p = pipe_new(&r, 1, writers, PARALLEL);

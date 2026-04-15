@@ -17,6 +17,7 @@
 // Wrapper for reader.
 typedef struct {
     Reader *reader;          /**< @brief Source of data items. */
+    void *ctx;
     Channel *output;         /**< @brief Channel to push items into. */
     atomic_int *cancelled;   /**< @brief Shared cancellation flag; set to 1 to stop the pipeline. */
 } ReadChain;
@@ -30,13 +31,14 @@ typedef struct {
  * @return               Pointer to the new @ref ReadChain, or @c NULL on allocation failure.
  */
 // Create new chain for reader.
-ReadChain *read_chain_new(Reader *reader, Channel *output, atomic_int *cancelled) {
+ReadChain *read_chain_new(Reader *reader, void *ctx,  Channel *output, atomic_int *cancelled) {
     ReadChain *rc = malloc(sizeof(ReadChain));
     if (rc == NULL) return NULL;
 
     rc->reader = reader;
     rc->output = output;
     rc->cancelled = cancelled;
+    rc->ctx = ctx;
 
     return rc;
 }
@@ -71,7 +73,7 @@ static void *read_chain_run(void *arg) {
     void *data = NULL;
 
     int code = 0;
-    while (atomic_load(rc->cancelled) == 0 && (code = rc->reader->read(&data)) == PIPE_OK) {
+    while (atomic_load(rc->cancelled) == 0 && (code = rc->reader->read(rc->ctx, &data)) == PIPE_OK) {
         if (channel_send(rc->output, data) != PIPE_OK) {
             free(data);
             atomic_store(rc->cancelled, 1);
@@ -83,7 +85,7 @@ static void *read_chain_run(void *arg) {
         atomic_store(rc->cancelled, 1);
     }
 
-    rc->reader->close();
+    rc->reader->close(rc->ctx);
 
     return NULL;
 }
@@ -97,6 +99,7 @@ static void *read_chain_run(void *arg) {
  */
 typedef struct {
     Writer *writer;          /**< @brief Sink for data items. */
+    void *ctx;
     Channel *input;          /**< @brief Channel to receive items from. */
     atomic_int *cancelled;   /**< @brief Shared cancellation flag; set to 1 to stop the pipeline. */
 } WriteChain;
@@ -110,13 +113,14 @@ typedef struct {
  * @return               Pointer to the new @ref WriteChain, or @c NULL on allocation failure.
  */
 // Create new chain for writer.
-WriteChain *write_chain_new(Writer *writer, Channel *input, atomic_int *cancelled) {
+WriteChain *write_chain_new(Writer *writer, void *ctx,  Channel *input, atomic_int *cancelled) {
     WriteChain *wc = malloc(sizeof(WriteChain));
     if (wc == NULL) return NULL;
 
     wc->writer = writer;
     wc->input = input;
     wc->cancelled = cancelled;
+    wc->ctx = ctx;
 
     return wc;
 }
@@ -151,7 +155,7 @@ static void *write_chain_run(void *arg) {
 
     int code = 0;
     while (atomic_load(wc->cancelled) == 0 && (code = channel_receive(wc->input, &data)) == PIPE_OK) {
-        if (wc->writer->write(&data) != PIPE_OK) {
+        if (wc->writer->write(wc->ctx, &data) != PIPE_OK) {
             free(data);
             atomic_store(wc->cancelled, 1);
             break;
@@ -163,7 +167,7 @@ static void *write_chain_run(void *arg) {
     }
 
     //TODO: process close error ?
-    wc->writer->close();
+    wc->writer->close(wc->ctx);
 
     return NULL;
 }
@@ -289,14 +293,14 @@ Pipe *pipe_new(Reader *readers, size_t readers_count, Writer *writers, size_t wr
             pipe->chans_created++;
 
             // Reader.
-            ReadChain *rc = read_chain_new(&readers[i], pipe->chans[i], &pipe->cancelled);
+            ReadChain *rc = read_chain_new(&readers[i], readers[i].ctx, pipe->chans[i], &pipe->cancelled);
             if (rc == NULL) goto cleanup;
 
             pipe->readers_chain[i] = rc;
             pipe->readers_created++;
 
             // Writer.
-            WriteChain *wc = write_chain_new(&writers[i], pipe->chans[i], &pipe->cancelled);
+            WriteChain *wc = write_chain_new(&writers[i], writers[i].ctx, pipe->chans[i], &pipe->cancelled);
             if (wc == NULL) goto cleanup;
 
             pipe->writers_chain[i] = wc;
@@ -311,7 +315,7 @@ Pipe *pipe_new(Reader *readers, size_t readers_count, Writer *writers, size_t wr
 
         // Set readers in a loop.
         for (size_t i = 0; i < readers_count; i++) {
-            ReadChain *rc = read_chain_new(&readers[i], pipe->chans[0], &pipe->cancelled);
+            ReadChain *rc = read_chain_new(&readers[i], readers[i].ctx,  pipe->chans[0], &pipe->cancelled);
             if (rc == NULL) goto cleanup;
 
             pipe->readers_chain[i] = rc;
@@ -319,7 +323,7 @@ Pipe *pipe_new(Reader *readers, size_t readers_count, Writer *writers, size_t wr
         }
         // Set writers in a loop.
         for (size_t i = 0; i < writers_count; i++) {
-            WriteChain *wc = write_chain_new(&writers[i], pipe->chans[0], &pipe->cancelled);
+            WriteChain *wc = write_chain_new(&writers[i], writers[i].ctx, pipe->chans[0], &pipe->cancelled);
             if (wc == NULL) goto cleanup;
 
             pipe->writers_chain[i] = wc;
