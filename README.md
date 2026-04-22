@@ -66,7 +66,7 @@ c_pipe/
 ### 1. Clone with submodules
 
 ```bash
-git clone --recurse-submodules https://github.com/you/c_pipe
+git clone --recurse-submodules https://github.com/filkeith/c_pipe
 cd c_pipe
 ```
 
