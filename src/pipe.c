@@ -14,8 +14,8 @@
  * Reads items from @c reader and pushes them into @c output until
  * either the reader signals EOF/error or @c cancelled is set to non-zero.
  */
-// Wrapper for reader.
 typedef struct {
+    // Wrapper for reader.
     Reader *reader;          /**< @brief Source of data items. */
     void *ctx;
     Channel *output;         /**< @brief Channel to push items into. */
@@ -30,8 +30,8 @@ typedef struct {
  * @param[in] cancelled  Shared cancellation flag. Must not be @c NULL.
  * @return               Pointer to the new @ref ReadChain, or @c NULL on allocation failure.
  */
-// Create new chain for reader.
 ReadChain *read_chain_new(Reader *reader, void *ctx,  Channel *output, atomic_int *cancelled) {
+    // Create new chain for reader.
     ReadChain *rc = malloc(sizeof(ReadChain));
     if (rc == NULL) return NULL;
 
@@ -112,8 +112,8 @@ typedef struct {
  * @param[in] cancelled  Shared cancellation flag. Must not be @c NULL.
  * @return               Pointer to the new @ref WriteChain, or @c NULL on allocation failure.
  */
-// Create new chain for writer.
 WriteChain *write_chain_new(Writer *writer, void *ctx,  Channel *input, atomic_int *cancelled) {
+    // Create new chain for writer.
     WriteChain *wc = malloc(sizeof(WriteChain));
     if (wc == NULL) return NULL;
 
@@ -182,8 +182,8 @@ static void *write_chain_run(void *arg) {
  * All threads share a single @c cancelled flag so any failure tears down
  * the whole pipeline.
  */
-// Main pipeline definition.
 struct Pipe {
+    // Main pipeline definition.
     ReadChain **readers_chain;            /**< @brief Array of reader chain wrappers. */
     size_t readers_count;                 /**< @brief Total number of readers requested. */
     size_t readers_created;              /**< @brief Number of reader chains successfully initialised (used for partial cleanup). */

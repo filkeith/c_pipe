@@ -18,14 +18,19 @@ else()
 endif()
 
 # Aerospike client library.
-add_library(aerospike STATIC IMPORTED)
+add_library(aerospike STATIC IMPORTED
+        src/as_reader.c
+        src/as_writer.c
+        include/c_pipe/as_writer.h)
 set_target_properties(aerospike PROPERTIES
         IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/vendor/aerospike-client-c/target/${AS_TARGET_PLATFORM}/lib/libaerospike.a
         INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/vendor/aerospike-client-c/src/include;${CMAKE_SOURCE_DIR}/vendor/aerospike-client-c/modules/common/src/include"
 )
 
 # Lib and header files.
-add_library(channel src/chan.c)
+add_library(channel src/chan.c
+        src/as_writer.c
+        include/c_pipe/as_writer.h)
 target_include_directories(channel PUBLIC include)
 
 # Unity for tests.
@@ -35,7 +40,9 @@ target_include_directories(unity PUBLIC vendor/Unity/src)
 # Main app.
 add_executable(c_pipe src/main.c src/pipe.c
         src/as_reader.c
-        include/c_pipe/as_reader.h)
+        include/c_pipe/as_reader.h
+        src/as_writer.c
+        include/c_pipe/as_writer.h)
 target_link_libraries(c_pipe PRIVATE channel aerospike pthread)
 
 # Tests.

@@ -6,11 +6,13 @@
 #include "c_pipe/chan.h"
 #include "c_pipe/pipe.h"
 
-#define AS_READER_QUEUE_SIZE 256
+#define AS_READER_QUEUE_SIZE 64
 
 struct AerospikeReader {
     // Client that is inited outside.
     aerospike *as;
+    // Last error, for clear logging. Not protected, should be read after evrything is closed.
+    as_error last_error;
 
     // Scan config and partition range.
     as_scan scan;
@@ -26,20 +28,27 @@ struct AerospikeReader {
     atomic_int error;
     atomic_int cancelled;
 
-    int started;
+    atomic_int started;
+
+    // Stats.
+    atomic_uint_fast64_t scanned;
+
+    //TODO: scan config?
 };
 
 AerospikeReader *as_reader_new(aerospike *as, const char *ns, const char *set, as_partition_filter pf) {
     if (as == NULL || ns == NULL || set == NULL) return NULL;
 
-    // Init reader.
-    AerospikeReader *r = malloc(sizeof(AerospikeReader));
+    // Init reader with 0s.
+    AerospikeReader *r = calloc(1, sizeof(AerospikeReader));
     if (r == NULL) return NULL;
 
     r->as = as;
     r->pf = pf;
     atomic_init(&r->error, 0);
     atomic_init(&r->cancelled, 0);
+    atomic_init(&r->started, 0);
+    atomic_init(&r->scanned, 0);
 
     // Init scan.
     as_scan_init(&r->scan, ns, set);
@@ -62,7 +71,7 @@ void as_reader_destroy(AerospikeReader *r) {
     if (r == NULL) return;
 
     // Wait for scan thread to finish.
-    if (r->started) {
+    if (atomic_load(&r->started)) {
         pthread_join(r->thread, NULL);
     }
 
@@ -82,15 +91,25 @@ static bool as_scan_callback(const as_val *val, void *arg) {
     }
 
     // Copy record.
-    as_val_reserve((as_val *)val);
     as_record *rec = as_record_fromval(val);
+    if (rec == NULL) {
+        atomic_store(&r->cancelled, 1);
+
+        return false;
+    }
+    // Reserver after success only.
+    as_val_reserve((as_val *)val);
 
     // Send record to chan.
     if (channel_send(r->chan, rec) != 0) {
         as_record_destroy(rec);
         atomic_store(&r->cancelled, 1);
+
         return false;
     }
+
+    // Increase scan counter.
+    atomic_fetch_add(&r->scanned, 1);
 
     return true;
 }
@@ -103,19 +122,22 @@ static void *scan_run(void *arg) {
     as_status status = aerospike_scan_partitions(r->as, &err, NULL, &r->scan, &r->pf, as_scan_callback, r);
 
     if (status != AEROSPIKE_OK && !atomic_load(&r->cancelled)) {
+        r->last_error = err;
         atomic_store(&r->error, 1);
-        channel_close(r->chan);
     }
+
+    // Close chan at the end of scan.
+    channel_close(r->chan);
 
     return NULL;
 }
 
 int as_reader_start(AerospikeReader *r) {
     if (r == NULL) return -1;
+    if (pthread_create(&r->thread, NULL, scan_run, r) != 0) return -1;
+    atomic_store(&r->started, 1);
 
-    r->started = 1;
-
-    return pthread_create(&r->thread, NULL, scan_run, r) == 0 ? 0 : -1;
+    return PIPE_OK;
 }
 
 
@@ -130,5 +152,9 @@ int as_reader_read(void *ctx, void **data) {
 }
 
 int as_reader_close(void *ctx) {
-    return 0;
+    AerospikeReader *r = ctx;
+    atomic_store(&r->cancelled, 1);
+    channel_close(r->chan);
+
+    return PIPE_OK;
 }
