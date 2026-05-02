@@ -156,6 +156,7 @@ static void *write_chain_run(void *arg) {
     int code = 0;
     while (atomic_load(wc->cancelled) == 0 && (code = channel_receive(wc->input, &data)) == PIPE_OK) {
         if (wc->writer->write(wc->ctx, &data) != PIPE_OK) {
+            //TODO: add callback to destroy records.
             free(data);
             atomic_store(wc->cancelled, 1);
             break;

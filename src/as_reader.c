@@ -16,7 +16,8 @@ struct AerospikeReader {
 
     // Scan config and partition range.
     as_scan scan;
-    as_partition_filter pf;
+
+    AerospikeReaderConfig cfg;
 
     // Internal chan to process results from as.
     Channel *chan;
@@ -36,22 +37,22 @@ struct AerospikeReader {
     //TODO: scan config?
 };
 
-AerospikeReader *as_reader_new(aerospike *as, const char *ns, const char *set, as_partition_filter pf) {
-    if (as == NULL || ns == NULL || set == NULL) return NULL;
+AerospikeReader *as_reader_new(aerospike *as, AerospikeReaderConfig cfg) {
+    if (as == NULL || cfg.ns == NULL || cfg.set == NULL) return NULL;
 
-    // Init reader with 0s.
+    // Init reader with 0's.
     AerospikeReader *r = calloc(1, sizeof(AerospikeReader));
     if (r == NULL) return NULL;
 
     r->as = as;
-    r->pf = pf;
+    r->cfg = cfg;
     atomic_init(&r->error, 0);
     atomic_init(&r->cancelled, 0);
     atomic_init(&r->started, 0);
     atomic_init(&r->scanned, 0);
 
     // Init scan.
-    as_scan_init(&r->scan, ns, set);
+    as_scan_init(&r->scan, r->cfg.ns, r->cfg.set);
 
     // Create channel for results.
     Channel *ch = channel_new(AS_READER_QUEUE_SIZE);
@@ -119,7 +120,7 @@ static void *scan_run(void *arg) {
     AerospikeReader *r = arg;
 
     as_error err;
-    as_status status = aerospike_scan_partitions(r->as, &err, NULL, &r->scan, &r->pf, as_scan_callback, r);
+    as_status status = aerospike_scan_partitions(r->as, &err, NULL, &r->scan, &r->cfg.pf, as_scan_callback, r);
 
     if (status != AEROSPIKE_OK && !atomic_load(&r->cancelled)) {
         r->last_error = err;

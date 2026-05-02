@@ -19,17 +19,22 @@
  */
 typedef struct AerospikeReader AerospikeReader;
 
+typedef struct {
+    const char *ns;
+    const char *set;
+    as_partition_filter pf;
+} AerospikeReaderConfig;
+
+
 /**
  * @brief Allocates and initialises a new AerospikeReader.
  *
  * @param[in] as   Connected aerospike client. Must not be @c NULL.
  *                 Caller retains ownership — reader never closes it.
- * @param[in] ns   Namespace to scan. Must not be @c NULL.
- * @param[in] set  Set to scan. Must not be @c NULL.
- * @param[in] pf   Partition filter defining the range to scan.
+ * @param cfg
  * @return         Pointer to the new reader, or @c NULL on failure.
  */
-AerospikeReader *as_reader_new(aerospike *as, const char *ns, const char *set, as_partition_filter pf);
+AerospikeReader *as_reader_new(aerospike *as, AerospikeReaderConfig cfg);
 
 /**
  * @brief Starts the background scan thread.
