@@ -91,6 +91,17 @@ int as_reader_close(void *ctx);
  */
 void as_reader_destroy(AerospikeReader *r);
 
+/**
+ * @brief @ref Reader.destroy_item implementation — wraps @c as_record_destroy.
+ *
+ * Pass as the @c destroy_item function pointer in a @ref Reader struct.
+ * Used by the pipeline to release records that were produced by the reader
+ * but could not be delivered downstream (e.g. when a writer aborted and
+ * the channel was closed mid-send).
+ *
+ * @param[in] data  @c as_record* previously produced by @ref as_reader_read.
+ *                  Must not be @c NULL.
+ */
 void as_reader_destroy_item(void *data);
 
 #endif /* C_PIPE_AS_READER_H */

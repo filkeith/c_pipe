@@ -45,7 +45,7 @@ struct Channel {
  */
 Channel *channel_new(const size_t size) {
     // Validation.
-    if (size == 0) return NULL;
+    if (size == 0 || size > SIZE_MAX / sizeof(void *)) return NULL;
 
     // Create new chan with zero vals.
     Channel *chan = calloc(1, sizeof(Channel));

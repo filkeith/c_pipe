@@ -103,6 +103,20 @@ uint64_t as_writer_failed(AerospikeWriter *w);
  */
 void as_writer_last_error(AerospikeWriter *w, as_error *out);
 
+/**
+ * @brief @ref Writer.destroy_item implementation — wraps @c as_record_destroy.
+ *
+ * Pass as the @c destroy_item function pointer in a @ref Writer struct.
+ * Used by the pipeline to release in-flight records that were fetched from
+ * the channel but rejected by @ref as_writer_write (i.e. on @c PIPE_ERR
+ * return — currently only the NULL-record contract violation).
+ *
+ * @note On the happy path this is never invoked: the writer takes ownership
+ *       of every accepted record and destroys it itself during flush.
+ *
+ * @param[in] data  @c as_record* previously fetched from the channel.
+ *                  Must not be @c NULL.
+ */
 void as_writer_destroy_item(void *data);
 
 #endif /* C_PIPE_AS_WRITER_H */
