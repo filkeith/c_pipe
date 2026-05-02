@@ -82,12 +82,21 @@ target_include_directories(aerospike SYSTEM INTERFACE
         ${CMAKE_SOURCE_DIR}/vendor/aerospike-client-c/modules/common/src/include
 )
 
+find_library(YAML_LIB NAMES yaml libyaml
+        HINTS /opt/homebrew/lib /opt/homebrew/opt/libyaml/lib /usr/local/lib /usr/lib)
+if(NOT YAML_LIB)
+    message(FATAL_ERROR
+            "libyaml not found. Install it: brew install libyaml (macOS) "
+            "or apt-get install libyaml-dev (Linux).")
+endif()
+
 # AS client transitive deps.
 if(APPLE)
     target_link_libraries(aerospike INTERFACE
             OpenSSL::SSL
             OpenSSL::Crypto
             ZLIB::ZLIB
+            ${YAML_LIB}
             "-framework Security"
             "-framework CoreFoundation"
     )
@@ -96,6 +105,7 @@ else()
             OpenSSL::SSL
             OpenSSL::Crypto
             ZLIB::ZLIB
+            ${YAML_LIB}
             rt dl m
     )
 endif()
