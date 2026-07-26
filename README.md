@@ -31,12 +31,14 @@ c_pipe/
 │   └── c_pipe/
 │       ├── chan.h          # Buffered channel public API
 │       ├── pipe.h          # Pipeline public API (Reader, Writer interfaces)
-│       └── as_reader.h     # Aerospike partition reader
+│       ├── as_reader.h     # Aerospike partition reader
+│       └── as_writer.h     # Aerospike batch writer
 ├── src/
 │   ├── chan.c              # Channel implementation (ring buffer + mutex + cond vars)
 │   ├── pipe.c              # Pipeline implementation
 │   ├── as_reader.c         # Aerospike scan reader implementation
-│   └── main.c
+│   ├── as_writer.c         # Aerospike batch writer implementation
+│   └── main.c              # Migration CLI
 ├── tests/
 │   ├── test_chan.c          # Channel unit tests (Unity)
 │   └── test_pipe.c         # Pipeline unit tests (Unity)
@@ -102,8 +104,7 @@ make test
 ### 5. Clean
 
 ```bash
-make clean        # removes build/
-make clean-all    # also cleans vendor/aerospike-client-c
+make clean        # removes build/, build-tsan/, build-asan/
 ```
 
 ---
@@ -136,15 +137,21 @@ Implement these two structs to plug any data source or sink into the pipeline:
 typedef struct {
     int (*read)(void *ctx, void **data);  // PIPE_OK / PIPE_EOF / PIPE_ERR
     int (*close)(void *ctx);
+    void (*destroy_item)(void *data);     // frees one produced item (required)
     void *ctx;                            // your context, passed through opaquely
 } Reader;
 
 typedef struct {
     int (*write)(void *ctx, void **data); // PIPE_OK / PIPE_ERR
     int (*close)(void *ctx);
+    void (*destroy_item)(void *data);     // frees one undelivered item (required)
     void *ctx;
 } Writer;
 ```
+
+`destroy_item` is mandatory on both sides — the pipeline uses it to free items
+that were produced but could not be delivered (e.g. when the pipeline is
+cancelled with items still in flight), so nothing leaks on failure paths.
 
 **Return codes:**
 
@@ -158,12 +165,12 @@ typedef struct {
 
 ```c
 Reader readers[2] = {
-    { .read = my_read, .close = my_close, .ctx = &ctx_a },
-    { .read = my_read, .close = my_close, .ctx = &ctx_b },
+    { .read = my_read, .close = my_close, .destroy_item = my_destroy, .ctx = &ctx_a },
+    { .read = my_read, .close = my_close, .destroy_item = my_destroy, .ctx = &ctx_b },
 };
 Writer writers[2] = {
-    { .write = my_write, .close = my_close, .ctx = &ctx_c },
-    { .write = my_write, .close = my_close, .ctx = &ctx_d },
+    { .write = my_write, .close = my_close, .destroy_item = my_destroy, .ctx = &ctx_c },
+    { .write = my_write, .close = my_close, .destroy_item = my_destroy, .ctx = &ctx_d },
 };
 
 Pipe *p = pipe_new(readers, 2, writers, 2);
@@ -189,23 +196,29 @@ as_error err;
 aerospike_connect(&as, &err);
 
 // Create reader for all partitions.
-as_partition_filter pf;
-as_partition_filter_set_all(&pf);
+AerospikeReaderConfig rcfg = { .ns = "my_namespace", .set = "my_set" };
+as_partition_filter_set_all(&rcfg.pf);
 
-AerospikeReader *ar = as_reader_new(&as, "my_namespace", "my_set", pf);
+AerospikeReader *ar = as_reader_new(&as, rcfg);
 
 // Start the background scan thread.
 as_reader_start(ar);
 
 // Wire into pipeline.
 Reader r = {
-    .read  = as_reader_read,
-    .close = as_reader_close,
-    .ctx   = ar,
+    .read         = as_reader_read,
+    .close        = as_reader_close,
+    .destroy_item = as_reader_destroy_item,
+    .ctx          = ar,
 };
 
 // Writer is responsible for calling as_record_destroy(*data) after processing.
-Writer w = { .write = my_writer_write, .close = my_writer_close, .ctx = &my_ctx };
+Writer w = {
+    .write        = my_writer_write,
+    .close        = my_writer_close,
+    .destroy_item = as_writer_destroy_item,
+    .ctx          = &my_ctx,
+};
 
 Pipe *p = pipe_new(&r, 1, &w, 1);
 pipe_run(p);

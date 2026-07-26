@@ -82,14 +82,37 @@ cleanup:
 void as_reader_destroy(AerospikeReader *r) {
     if (r == NULL) return;
 
+    // Unblock the scan thread if it is stuck on a full channel (e.g. the
+    // pipeline never consumed and close() was not called). Idempotent — on
+    // the normal path the channel is already closed.
+    channel_close(r->chan);
+
     // Wait for scan thread to finish.
     if (atomic_load(&r->started)) {
         pthread_join(r->thread, NULL);
     }
 
+    // Drain records that never reached a consumer.
+    void *item = NULL;
+    while (channel_receive(r->chan, &item) == 0) {
+        as_record_destroy((as_record *)item);
+    }
+
     channel_destroy(r->chan);
     as_scan_destroy(&r->scan);
     free(r);
+}
+
+/**
+ * @brief Records the first error seen; later errors are dropped.
+ *
+ * The error flag doubles as a publish guard: multiple scan callback threads
+ * may race here, only the winner of the exchange writes @c last_error.
+ */
+static void reader_capture_error(AerospikeReader *r, const as_error *err) {
+    if (atomic_exchange(&r->error, 1) == 0) {
+        r->last_error = *err;
+    }
 }
 
 /**
@@ -108,7 +131,10 @@ static bool as_scan_callback(const as_val *val, void *arg) {
     as_record *rec = as_record_fromval(val);
     if (rec == NULL) {
         // Parse failure — record this as a real error so read() returns PIPE_ERR.
-        atomic_store(&r->error, 1);
+        as_error err;
+        as_error_setall(&err, AEROSPIKE_ERR_CLIENT,
+                        "scan record parse failed", "", "", 0);
+        reader_capture_error(r, &err);
         return false;
     }
     // Reserve only after parse success — keeps refcount balanced.
@@ -139,12 +165,10 @@ static void *scan_run(void *arg) {
         r->as, &err, NULL, &r->scan, &r->cfg.pf, as_scan_callback, r);
 
     // Record only transport-level failures here. Per-record parse errors are
-    // already flagged from the callback.
-    if (status != AEROSPIKE_OK
-        && !atomic_load(&r->cancelled)
-        && !atomic_load(&r->error)) {
-        r->last_error = err;
-        atomic_store(&r->error, 1);
+    // already flagged from the callback; an abort we requested via close()
+    // is not an error.
+    if (status != AEROSPIKE_OK && !atomic_load(&r->cancelled)) {
+        reader_capture_error(r, &err);
     }
 
     // Always close — idempotent, unblocks any waiting reader.
@@ -155,6 +179,8 @@ static void *scan_run(void *arg) {
 
 int as_reader_start(AerospikeReader *r) {
     if (r == NULL) return -1;
+    // A second start would overwrite r->thread and orphan the first thread.
+    if (atomic_load(&r->started)) return -1;
     if (pthread_create(&r->thread, NULL, scan_run, r) != 0) return -1;
     atomic_store(&r->started, 1);
     return 0;
@@ -185,4 +211,16 @@ int as_reader_close(void *ctx) {
 
 void as_reader_destroy_item(void *data) {
     as_record_destroy((as_record *)data);
+}
+
+int as_reader_error(AerospikeReader *r, as_error *out) {
+    if (r == NULL || !atomic_load(&r->error)) return 0;
+    if (out != NULL) {
+        *out = r->last_error;
+    }
+    return 1;
+}
+
+uint64_t as_reader_scanned(AerospikeReader *r) {
+    return atomic_load(&r->scanned);
 }

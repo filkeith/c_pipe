@@ -115,7 +115,11 @@ typedef struct {
      *
      * On @c PIPE_OK return the writer has taken ownership of @c *data and is
      * responsible for freeing it. On @c PIPE_ERR the pipeline frees @c *data
-     * via @c destroy_item; the writer must not free it itself in that path.
+     * via @c destroy_item — unless the writer already consumed the item and
+     * reset @c *data to @c NULL, in which case the pipeline does nothing.
+     * A writer must therefore either leave @c *data untouched on error or
+     * take ownership and set @c *data to @c NULL; it must never free the item
+     * and leave the stale pointer behind.
      *
      * @param[in]     ctx   Caller-supplied execution context. May be @c NULL.
      * @param[in,out] data  Pointer to the item to consume.
@@ -139,7 +143,8 @@ typedef struct {
      * @brief Free a single item that was fetched but not delivered.
      *
      * Required (must not be @c NULL). Invoked by the pipeline if @c write
-     * returns @c PIPE_ERR, so the in-flight item is not leaked.
+     * returns @c PIPE_ERR with @c *data still non-NULL, so the in-flight item
+     * is not leaked.
      *
      * @param[in] data  Item previously fetched from the channel. Must not be @c NULL.
      */
@@ -196,16 +201,41 @@ Pipe *pipe_new(Reader *readers, size_t readers_count,
  *
  * On any reader/writer error the shared @c cancelled flag is raised; chains
  * that exit due to cancellation also close their I/O channel so peers blocked
- * on @ref channel_send / @ref channel_receive cannot deadlock.
+ * on @ref channel_send / @ref channel_receive cannot deadlock. After all
+ * threads are joined, items stranded in the channels are freed via the
+ * producing reader's @c destroy_item.
  *
  * On thread creation/join failure all channels are closed and all started
  * threads are joined before returning.
  *
- * @param[in] pipe  Fully initialised pipeline. Must not be @c NULL.
+ * @note Cancellation-latency limitation: a reader chain notices the
+ *       @c cancelled flag only between @c read calls. If a reader's @c read
+ *       blocks indefinitely (e.g. a stalled network scan), cancellation
+ *       triggered by another chain waits until that call returns. Readers
+ *       whose @c read may block for long periods should provide an external
+ *       way to unblock it (as @c as_reader_close does by closing its bridge
+ *       channel).
+ *
+ * @param[in] pipe  Fully initialised pipeline.
  * @return  @c 0  all threads completed successfully.
- * @return  @c -1 thread creation or join failure.
+ * @return  @c -1 thread creation/join failure, or @p pipe was @c NULL.
  */
 int pipe_run(Pipe *pipe);
+
+/**
+ * @brief Reports whether the pipeline was cancelled.
+ *
+ * Cancellation is raised when any reader or writer returns @c PIPE_ERR, or
+ * when a channel is closed underneath a chain. A cancelled run means the data
+ * flow was cut short — callers should treat the result as incomplete even if
+ * @ref pipe_run itself returned @c 0.
+ *
+ * @param[in] pipe  Pipeline. May be @c NULL (returns 0).
+ * @return  Non-zero if the pipeline was cancelled, @c 0 otherwise.
+ *
+ * @note Safe to call only after @ref pipe_run has returned.
+ */
+int pipe_cancelled(Pipe *pipe);
 
 /**
  * @brief Destroys the pipeline and releases all associated resources.

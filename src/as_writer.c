@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdatomic.h>
+#include <time.h>
 
 #include <aerospike/aerospike_batch.h>
 #include <aerospike/as_key.h>
@@ -15,6 +16,10 @@
 #include "c_pipe/pipe.h"
 
 #define AS_WRITER_DEFAULT_BATCH 128
+
+/** Exponential retry backoff: base * 2^attempt, capped. */
+#define AS_WRITER_BACKOFF_BASE_MS 100
+#define AS_WRITER_BACKOFF_CAP_MS  2000
 
 /**
  * @brief Single-threaded buffered batch writer.
@@ -37,6 +42,7 @@ struct AerospikeWriter {
     // Stats.
     atomic_uint_fast64_t inserted;
     atomic_uint_fast64_t failed;
+    atomic_uint_fast64_t skipped;
     atomic_int error_set;
 
     AerospikeWriterConfig cfg;
@@ -58,6 +64,38 @@ static void capture_error(AerospikeWriter *w, const as_error *err) {
     if (atomic_exchange(&w->error_set, 1) == 0) {
         w->last_error = *err;
     }
+}
+
+/**
+ * @brief Classifies a status as transient (worth retrying) or permanent.
+ *
+ * Permanent failures (record too big, forbidden, param errors, ...) would
+ * fail identically on every retry — burn no attempts on them.
+ */
+static bool status_retryable(as_status st) {
+    switch (st) {
+        case AEROSPIKE_ERR_TIMEOUT:
+        case AEROSPIKE_ERR_CONNECTION:
+        case AEROSPIKE_ERR_CLUSTER:
+        case AEROSPIKE_ERR_INVALID_NODE:
+        case AEROSPIKE_ERR_DEVICE_OVERLOAD:
+        case AEROSPIKE_ERR_RECORD_BUSY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/** @brief Sleeps base * 2^attempt ms, capped — eases load on a struggling cluster. */
+static void backoff_sleep(uint32_t attempt) {
+    uint64_t ms = (uint64_t)AS_WRITER_BACKOFF_BASE_MS << (attempt < 32 ? attempt : 31);
+    if (ms > AS_WRITER_BACKOFF_CAP_MS) ms = AS_WRITER_BACKOFF_CAP_MS;
+
+    struct timespec ts = {
+        .tv_sec  = (time_t)(ms / 1000),
+        .tv_nsec = (long)(ms % 1000) * 1000000L,
+    };
+    nanosleep(&ts, NULL);
 }
 
 /**
@@ -105,6 +143,9 @@ static int attach_record(AerospikeWriter *w, as_batch_records *recs, as_record *
     }
 
     if (rec->key.valuep != NULL) {
+        // as_batch_records_destroy will decref the value via as_key_destroy;
+        // reserve it so the record's own key survives (symmetric to bins above).
+        as_val_reserve((as_val *)rec->key.valuep);
         as_key_init_value(&bw->key, w->cfg.ns, w->cfg.set, rec->key.valuep);
     } else {
         as_key_init_digest(&bw->key, w->cfg.ns, w->cfg.set, rec->key.digest.value);
@@ -118,11 +159,14 @@ static int attach_record(AerospikeWriter *w, as_batch_records *recs, as_record *
 /**
  * @brief Flushes @c w->buf — one batch_write call plus retries for failed records.
  *
- * In-place compaction: survivors of each pass are packed at the front of
- * @c w->buf and retried. After @c max_retries exhausted attempts, leftovers
- * are destroyed and counted in @c failed. Build failures (e.g. OOM in
- * @ref attach_record) are treated as fatal for the remaining records — no
- * retry, since OOM is unlikely to clear on the next pass.
+ * Only transient failures (see @ref status_retryable) are retried, with
+ * exponential backoff between attempts; permanent failures are counted in
+ * @c failed immediately. In-place compaction: survivors of each pass are
+ * packed at the front of @c w->buf and retried. After @c max_retries
+ * exhausted attempts, leftovers are destroyed and counted in @c failed.
+ * Build failures (e.g. OOM in @ref attach_record) are treated as fatal for
+ * the remaining records — no retry, since OOM is unlikely to clear on the
+ * next pass.
  */
 static void flush(AerospikeWriter *w) {
     if (w->buf_count == 0) return;
@@ -155,11 +199,18 @@ static void flush(AerospikeWriter *w) {
         size_t survivors = 0;
 
         if (st != AEROSPIKE_OK) {
-            // Whole-batch transport failure — retry everything as-is.
             capture_error(w, &err);
             survivors = n;
+
+            if (!status_retryable(st)) {
+                // Permanent whole-batch failure — retrying would fail the
+                // same way. Leftovers get destroyed and counted below.
+                as_batch_records_destroy(&recs);
+                break;
+            }
         } else {
-            // Per-record inspection. Compact survivors in place.
+            // Per-record inspection. Retryable failures are compacted in
+            // place as survivors; permanent ones fail immediately.
             for (size_t i = 0; i < n; i++) {
                 as_batch_write_record *br =
                     (as_batch_write_record *)as_vector_get(&recs.list, (uint32_t)i);
@@ -168,24 +219,36 @@ static void flush(AerospikeWriter *w) {
                     atomic_fetch_add(&w->inserted, 1);
                     as_record_destroy(w->buf[i]);
                     w->buf[i] = NULL;
-                } else {
-                    as_error rerr;
-                    as_error_setall(&rerr, br->result,
-                                    "batch record failed", "", "", 0);
-                    capture_error(w, &rerr);
-
-                    // Compact survivor at the front.
-                    if (survivors != i) {
-                        w->buf[survivors] = w->buf[i];
-                        w->buf[i] = NULL;
-                    }
-                    survivors++;
+                    continue;
                 }
+
+                as_error rerr;
+                as_error_setall(&rerr, br->result,
+                                "batch record failed", "", "", 0);
+                capture_error(w, &rerr);
+
+                if (!status_retryable(br->result)) {
+                    atomic_fetch_add(&w->failed, 1);
+                    as_record_destroy(w->buf[i]);
+                    w->buf[i] = NULL;
+                    continue;
+                }
+
+                // Compact survivor at the front.
+                if (survivors != i) {
+                    w->buf[survivors] = w->buf[i];
+                    w->buf[i] = NULL;
+                }
+                survivors++;
             }
         }
 
         as_batch_records_destroy(&recs);
         n = survivors;
+
+        if (n > 0 && attempt < w->cfg.max_retries) {
+            backoff_sleep(attempt);
+        }
     }
 
     // Anything left after retries is permanently failed.
@@ -212,6 +275,7 @@ AerospikeWriter *as_writer_new(aerospike *as, AerospikeWriterConfig cfg) {
     w->cfg = cfg;
     atomic_init(&w->inserted,  0);
     atomic_init(&w->failed,    0);
+    atomic_init(&w->skipped,   0);
     atomic_init(&w->error_set, 0);
 
     // Allocate pending buffer.
@@ -225,6 +289,9 @@ AerospikeWriter *as_writer_new(aerospike *as, AerospikeWriterConfig cfg) {
     // Overwrite if exists, create otherwise. Generation conflicts ignored.
     w->write_policy.exists = AS_POLICY_EXISTS_IGNORE;
     w->write_policy.gen    = AS_POLICY_GEN_IGNORE;
+    // Send the user key to the target when the source record carries one —
+    // the default (DIGEST) would silently drop stored keys during migration.
+    w->write_policy.key    = AS_POLICY_KEY_SEND;
 
     return w;
 
@@ -245,6 +312,14 @@ void as_writer_destroy(AerospikeWriter *w) {
     free(w);
 }
 
+/** @brief True if the record carries at least one non-NULL bin value. */
+static bool record_has_values(const as_record *rec) {
+    for (uint16_t i = 0; i < rec->bins.size; i++) {
+        if (rec->bins.entries[i].valuep != NULL) return true;
+    }
+    return false;
+}
+
 int as_writer_write(void *ctx, void **data) {
     AerospikeWriter *w = ctx;
 
@@ -261,6 +336,14 @@ int as_writer_write(void *ctx, void **data) {
                         "writer received NULL record", "", "", 0);
         capture_error(w, &err);
         return PIPE_ERR;
+    }
+
+    // A record with no bin values would produce an empty ops list, which the
+    // server rejects — it would burn all retries and land in `failed`.
+    if (!record_has_values(rec)) {
+        atomic_fetch_add(&w->skipped, 1);
+        as_record_destroy(rec);
+        return PIPE_OK;
     }
 
     // Buffer, flush if full.
@@ -288,6 +371,10 @@ uint64_t as_writer_inserted(AerospikeWriter *w) {
 
 uint64_t as_writer_failed(AerospikeWriter *w) {
     return atomic_load(&w->failed);
+}
+
+uint64_t as_writer_skipped(AerospikeWriter *w) {
+    return atomic_load(&w->skipped);
 }
 
 void as_writer_last_error(AerospikeWriter *w, as_error *out) {

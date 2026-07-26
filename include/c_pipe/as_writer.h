@@ -12,9 +12,13 @@
  *
  * Records pushed via @ref as_writer_write are accumulated in an internal
  * fixed-size buffer; once full (or on @ref as_writer_close) the writer
- * flushes the buffer through @c aerospike_batch_write. Per-record failures
- * are retried up to @c max_retries times, then counted as permanent and
- * the pipeline keeps going — single record failures never fail the pipeline.
+ * flushes the buffer through @c aerospike_batch_write. Transient per-record
+ * failures (timeouts, connection/cluster errors, overload) are retried up to
+ * @c max_retries times with exponential backoff, then counted as permanent;
+ * non-retryable failures are counted immediately. The pipeline keeps going —
+ * single record failures never fail the pipeline. Records with no bin values
+ * are skipped (counted in @ref as_writer_skipped) rather than sent as empty
+ * batches.
  *
  * @note The writer takes ownership of every @c as_record* passed in and
  *       calls @c as_record_destroy on it, regardless of success or failure.
@@ -89,8 +93,11 @@ void as_writer_destroy(AerospikeWriter *w);
 /** @brief Number of records successfully written. */
 uint64_t as_writer_inserted(AerospikeWriter *w);
 
-/** @brief Number of records that exhausted retries and were dropped. */
+/** @brief Number of records that failed permanently (non-retryable error or exhausted retries). */
 uint64_t as_writer_failed(AerospikeWriter *w);
+
+/** @brief Number of records skipped because they carried no bin values. */
+uint64_t as_writer_skipped(AerospikeWriter *w);
 
 /**
  * @brief Copies the first error encountered by the writer, if any.

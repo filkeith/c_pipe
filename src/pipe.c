@@ -125,20 +125,21 @@ static void *write_chain_run(void *arg) {
     WriteChain *wc = arg;
 
     void *data = NULL;
-    int code = PIPE_OK;
 
     while (atomic_load(wc->cancelled) == 0
-           && (code = channel_receive(wc->input, &data)) == 0) {
+           && channel_receive(wc->input, &data) == 0) {
         if (wc->writer->write(wc->ctx, &data) != PIPE_OK) {
             // Writer reports fatal — drop the in-flight item it didn't take.
-            wc->writer->destroy_item(data);
+            // Writers that consume the item eagerly reset *data to NULL, so
+            // guard against passing a consumed pointer to destroy_item.
+            if (data != NULL) {
+                wc->writer->destroy_item(data);
+            }
             atomic_store(wc->cancelled, 1);
             break;
         }
+        data = NULL;  // consumed — do not reuse the pointer on the next iteration
     }
-
-    // Whole-batch error from writer — already handled above. The local `code`
-    // here only signals receive outcome (0 = ok, -1 = closed-and-drained).
 
     // On cancellation, close input to unblock any peer waiting on send.
     if (atomic_load(wc->cancelled)) {
@@ -171,6 +172,38 @@ struct Pipe {
 
     atomic_int cancelled;
 };
+
+int pipe_cancelled(Pipe *pipe) {
+    if (pipe == NULL) return 0;
+    return atomic_load(&pipe->cancelled);
+}
+
+/**
+ * @brief Drains undelivered items left in the channels after cancellation.
+ *
+ * On normal EOF the writers fully drain the channels, so this is a no-op.
+ * After cancellation, however, writers stop before the channels are empty and
+ * any in-flight items would leak. Items are freed via the producing reader's
+ * @c destroy_item: in the paired topology @c chans[i] belongs to
+ * @c readers_chain[i]; in the shared topology all readers are homogeneous
+ * enough that @c readers_chain[0] serves.
+ *
+ * @warning Must only be called after all pipeline threads have been joined.
+ */
+static void pipe_drain(Pipe *pipe) {
+    for (size_t i = 0; i < pipe->chans_created; i++) {
+        if (pipe->readers_created == 0) break;
+
+        void (*destroy)(void *) = (pipe->chans_count == pipe->readers_count)
+            ? pipe->readers_chain[i]->reader->destroy_item
+            : pipe->readers_chain[0]->reader->destroy_item;
+
+        void *item = NULL;
+        while (channel_receive(pipe->chans[i], &item) == 0) {
+            destroy(item);
+        }
+    }
+}
 
 void pipe_destroy(Pipe *pipe) {
     if (pipe == NULL) return;
@@ -294,6 +327,8 @@ cleanup:
 }
 
 int pipe_run(Pipe *pipe) {
+    if (pipe == NULL) return -1;
+
     pthread_t *read_threads  = malloc(sizeof(pthread_t) * pipe->readers_count);
     pthread_t *write_threads = malloc(sizeof(pthread_t) * pipe->writers_count);
     if (read_threads == NULL || write_threads == NULL) {
@@ -349,6 +384,9 @@ int pipe_run(Pipe *pipe) {
         writers_joined++;
     }
 
+    // Free items stranded in the channels if the pipeline was cancelled.
+    pipe_drain(pipe);
+
     free(read_threads);
     free(write_threads);
     return 0;
@@ -366,6 +404,8 @@ cleanup:
     for (size_t i = writers_joined; i < writers_started; i++) {
         pthread_join(write_threads[i], NULL);
     }
+
+    pipe_drain(pipe);
 
     free(read_threads);
     free(write_threads);

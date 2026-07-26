@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdatomic.h>
+#include <time.h>
 
 #include "unity.h"
 #include "c_pipe/pipe.h"
@@ -203,6 +204,11 @@ void test_pipe_run_fan_out(void) {
     pipe_destroy(p);
 }
 
+// pipe_run guards against NULL.
+void test_pipe_run_null_returns_error(void) {
+    TEST_ASSERT_EQUAL_INT(-1, pipe_run(NULL));
+}
+
 // ---------- Failure-path test: writer fails on every record. ----------
 
 static int failing_write(void *ctx, void **data) {
@@ -232,6 +238,77 @@ void test_pipe_run_writer_error_destroys_inflight(void) {
     pipe_destroy(p);
 }
 
+// ---------- Failure-path test: reader fails mid-stream. ----------
+
+// Reads like test_read but returns PIPE_ERR (instead of EOF) once the limit
+// is hit — models a scan that dies mid-migration.
+static int erroring_read(void *ctx, void **data) {
+    (void)ctx;
+    int idx = atomic_fetch_add(&g_read_index, 1);
+    if (idx >= atomic_load(&g_read_limit)) {
+        return PIPE_ERR;
+    }
+
+    int *val = malloc(sizeof(int));
+    if (val == NULL) return PIPE_ERR;
+
+    *val = idx;
+    atomic_fetch_add(&g_total_sent, 1);
+    *data = val;
+
+    return PIPE_OK;
+}
+
+// On reader error: cancellation propagates, pipe_run still returns 0 (threads
+// were fine), and every produced item is either consumed by the writer or
+// freed via destroy_item — nothing leaks.
+void test_pipe_run_reader_error_no_leaks(void) {
+    Reader r = { erroring_read, test_close_noop, test_destroy_int, NULL };
+    Writer w = make_writer();
+
+    Pipe *p = pipe_new(&r, 1, &w, 1);
+    TEST_ASSERT_NOT_NULL(p);
+
+    TEST_ASSERT_EQUAL_INT(0, pipe_run(p));
+
+    TEST_ASSERT_EQUAL_INT(atomic_load(&g_total_sent),
+                          atomic_load(&g_total_received)
+                          + atomic_load(&g_destroyed));
+
+    pipe_destroy(p);
+}
+
+// ---------- Failure-path test: slow writer + cancellation. ----------
+
+// Consumes like test_write but takes ~1ms per item, so the channel fills up
+// and still holds items when the pipeline is cancelled.
+static int slow_write(void *ctx, void **data) {
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000L };
+    nanosleep(&ts, NULL);
+    return test_write(ctx, data);
+}
+
+// A fast erroring reader plus a slow writer leaves in-flight items in the
+// channel at cancellation time; pipe_run must drain and destroy them.
+// (This is the leak ASan would flag without the post-join channel drain.)
+void test_pipe_run_cancel_drains_channel(void) {
+    atomic_store(&g_read_limit, 200);
+
+    Reader r = { erroring_read, test_close_noop, test_destroy_int, NULL };
+    Writer w = { slow_write,    test_close_noop, test_destroy_int, NULL };
+
+    Pipe *p = pipe_new(&r, 1, &w, 1);
+    TEST_ASSERT_NOT_NULL(p);
+
+    TEST_ASSERT_EQUAL_INT(0, pipe_run(p));
+
+    TEST_ASSERT_EQUAL_INT(atomic_load(&g_total_sent),
+                          atomic_load(&g_total_received)
+                          + atomic_load(&g_destroyed));
+
+    pipe_destroy(p);
+}
+
 // Run the tests.
 int main(void) {
     UNITY_BEGIN();
@@ -245,7 +322,10 @@ int main(void) {
     RUN_TEST(test_pipe_run_multi_paired);
     RUN_TEST(test_pipe_run_fan_in);
     RUN_TEST(test_pipe_run_fan_out);
+    RUN_TEST(test_pipe_run_null_returns_error);
     RUN_TEST(test_pipe_run_writer_error_destroys_inflight);
+    RUN_TEST(test_pipe_run_reader_error_no_leaks);
+    RUN_TEST(test_pipe_run_cancel_drains_channel);
 
     return UNITY_END();
 }

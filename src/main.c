@@ -50,26 +50,52 @@ static void usage(const char *prog) {
         "          [--user USER] [--password PASS]\n"
         "\n"
         "Migrates all records of NS.SET from source cluster to target cluster.\n"
-        "Splits the 4096 partitions across N workers (paired reader/writer).\n",
+        "Splits the 4096 partitions across N workers (paired reader/writer).\n"
+        "\n"
+        "HOST may be an IPv4 address, a hostname, or a bracketed IPv6 address\n"
+        "([::1]:3000).\n"
+        "\n"
+        "The password may also be supplied via the AS_PASSWORD environment\n"
+        "variable, which is preferred over --password: command-line arguments\n"
+        "are visible in `ps` output and shell history.\n",
         prog);
 }
 
 /**
- * @brief Splits "host:port" into separate strings.
+ * @brief Splits "host:port" or "[ipv6]:port" into separate strings.
  *
- * Mutates @p s in place — replaces ':' with '\0'. Returns -1 on malformed input.
+ * IPv6 addresses must be bracketed ("[::1]:3000") — an unbracketed address
+ * with multiple colons is rejected as ambiguous. Mutates @p s in place —
+ * terminates the host with '\0'. Returns -1 on malformed input.
  */
 static int split_host_port(char *s, const char **host_out, int *port_out) {
     if (s == NULL || *s == '\0') return -1;
 
-    char *colon = strrchr(s, ':');
-    if (colon == NULL || colon == s || *(colon + 1) == '\0') return -1;
+    const char *port_str;
 
-    *colon = '\0';
-    *host_out = s;
+    if (*s == '[') {
+        // Bracketed IPv6: [addr]:port
+        char *rbracket = strchr(s, ']');
+        if (rbracket == NULL || rbracket == s + 1 || *(rbracket + 1) != ':') return -1;
+
+        *rbracket = '\0';
+        *host_out = s + 1;
+        port_str  = rbracket + 2;
+    } else {
+        char *colon = strrchr(s, ':');
+        if (colon == NULL || colon == s) return -1;
+        // A second colon means an unbracketed IPv6 address — ambiguous.
+        if (memchr(s, ':', (size_t)(colon - s)) != NULL) return -1;
+
+        *colon = '\0';
+        *host_out = s;
+        port_str  = colon + 1;
+    }
+
+    if (*port_str == '\0') return -1;
 
     char *end;
-    long port = strtol(colon + 1, &end, 10);
+    long port = strtol(port_str, &end, 10);
     if (*end != '\0' || port <= 0 || port > 65535) return -1;
     *port_out = (int)port;
 
@@ -84,6 +110,13 @@ static int parse_uint(const char *s, uint32_t *out) {
     *out = (uint32_t)v;
     return 0;
 }
+
+/**
+ * Local copy of the password. --password's optarg is scrubbed right after
+ * copying so the secret does not linger in /proc/<pid>/cmdline (Linux) for
+ * the lifetime of a long migration.
+ */
+static char g_password[256];
 
 static int parse_args(int argc, char **argv, AppConfig *cfg) {
     static struct option opts[] = {
@@ -115,7 +148,19 @@ static int parse_args(int argc, char **argv, AppConfig *cfg) {
             case 'n': cfg->ns      = optarg; break;
             case 'S': cfg->set     = optarg; break;
             case 'u': cfg->user    = optarg; break;
-            case 'P': cfg->password = optarg; break;
+            case 'P': {
+                size_t len = strlen(optarg);
+                if (len >= sizeof(g_password)) {
+                    fprintf(stderr, "--password is too long (max %zu chars)\n",
+                            sizeof(g_password) - 1);
+                    return -1;
+                }
+                memcpy(g_password, optarg, len + 1);
+                cfg->password = g_password;
+                // Scrub the secret from the process cmdline.
+                memset(optarg, 0, len);
+                break;
+            }
             case 'p':
                 if (parse_uint(optarg, &cfg->parallel) != 0
                     || cfg->parallel > MAX_PARALLEL) {
@@ -160,9 +205,18 @@ static int parse_args(int argc, char **argv, AppConfig *cfg) {
         return -1;
     }
 
+    // Environment fallback — preferred over --password (not visible in ps).
+    if (cfg->password == NULL) {
+        cfg->password = getenv("AS_PASSWORD");
+    }
+
     // user/password — both or neither.
-    if ((cfg->user == NULL) != (cfg->password == NULL)) {
-        fprintf(stderr, "--user and --password must be specified together.\n");
+    if (cfg->user != NULL && cfg->password == NULL) {
+        fprintf(stderr, "--user requires a password (--password or AS_PASSWORD).\n");
+        return -1;
+    }
+    if (cfg->user == NULL && cfg->password != NULL) {
+        fprintf(stderr, "A password was supplied without --user.\n");
         return -1;
     }
 
@@ -330,45 +384,68 @@ fail:
 /**
  * @brief Sums per-worker stats and prints the migration summary.
  *
- * @return  number of permanently failed records across all workers.
+ * Checks both sides of the pipeline: writer failures AND reader (scan)
+ * errors — a failed scan means records were never even read, which must not
+ * look like a successful migration.
+ *
+ * @return  @c 0 if the migration completed cleanly, @c 1 otherwise.
  */
-static uint64_t print_summary(const Worker *workers, uint32_t parallel) {
-    uint64_t total_inserted = 0;
-    uint64_t total_failed   = 0;
-    bool     any_error      = false;
-    as_error first_error    = { .code = 0 };
+static int print_summary(const Worker *workers, uint32_t parallel) {
+    uint64_t total_scanned   = 0;
+    uint64_t total_inserted  = 0;
+    uint64_t total_skipped   = 0;
+    uint64_t total_failed    = 0;
+    bool     any_write_error = false;
+    bool     any_scan_error  = false;
+    as_error first_write_error = { .code = 0 };
+    as_error first_scan_error  = { .code = 0 };
 
     for (uint32_t i = 0; i < parallel; i++) {
+        total_scanned  += as_reader_scanned(workers[i].reader);
         total_inserted += as_writer_inserted(workers[i].writer);
+        total_skipped  += as_writer_skipped(workers[i].writer);
         total_failed   += as_writer_failed(workers[i].writer);
 
-        if (!any_error) {
+        if (!any_write_error) {
             as_error e = { .code = 0 };
             as_writer_last_error(workers[i].writer, &e);
             if (e.code != 0) {
-                first_error = e;
-                any_error = true;
+                first_write_error = e;
+                any_write_error = true;
             }
+        }
+
+        if (!any_scan_error
+            && as_reader_error(workers[i].reader, &first_scan_error)) {
+            any_scan_error = true;
         }
     }
 
     fprintf(stdout,
         "----------------------------------------\n"
         "Migration summary:\n"
+        "  scanned:  %llu\n"
         "  inserted: %llu\n"
+        "  skipped:  %llu\n"
         "  failed:   %llu\n"
         "  workers:  %u\n",
+        (unsigned long long)total_scanned,
         (unsigned long long)total_inserted,
+        (unsigned long long)total_skipped,
         (unsigned long long)total_failed,
         parallel);
 
-    if (any_error) {
-        fprintf(stdout, "  first error: %d %s\n",
-                first_error.code, first_error.message);
+    if (any_scan_error) {
+        fprintf(stdout, "  scan error (migration incomplete): %d %s\n",
+                first_scan_error.code, first_scan_error.message);
+    }
+    if (any_write_error) {
+        fprintf(stdout, "  first write error: %d %s\n",
+                first_write_error.code, first_write_error.message);
     }
     fprintf(stdout, "----------------------------------------\n");
 
-    return total_failed;
+    return (total_failed == 0 && !any_scan_error) ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -427,15 +504,22 @@ int main(int argc, char **argv) {
         rc = 2;
     } else {
         int prc = pipe_run(pipe);
-        pipe_destroy(pipe);
 
         if (prc != 0) {
             fprintf(stderr, "pipe_run failed (thread create/join error)\n");
             rc = 2;
         } else {
-            uint64_t failed = print_summary(workers, cfg.parallel);
-            rc = (failed == 0) ? 0 : 1;
+            rc = print_summary(workers, cfg.parallel);
+
+            // Belt and braces: a cancelled pipeline means the flow was cut
+            // short — never report success even if no error surfaced above.
+            if (rc == 0 && pipe_cancelled(pipe)) {
+                fprintf(stderr, "pipeline was cancelled — migration incomplete\n");
+                rc = 1;
+            }
         }
+
+        pipe_destroy(pipe);
     }
 
     /* Destroy workers — joins any still-alive scan threads. */

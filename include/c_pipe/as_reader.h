@@ -1,7 +1,10 @@
 #ifndef C_PIPE_AS_READER_H
 #define C_PIPE_AS_READER_H
 
+#include <stdint.h>
+
 #include <aerospike/aerospike.h>
+#include <aerospike/as_error.h>
 #include <aerospike/as_partition_filter.h>
 
 /**
@@ -13,8 +16,9 @@
  * pipeline. The scan runs on a background thread and pushes records into
  * an internal @ref Channel; @ref as_reader_read drains that channel.
  *
- * Diagnostic getters (@ref as_writer_failed-style accessors) are not added
- * here yet — query them by reading public fields after @ref pipe_run returns.
+ * Diagnostics (@ref as_reader_error, @ref as_reader_scanned) are safe to
+ * query only after the pipeline has finished, i.e. after @ref pipe_run
+ * returns.
  */
 
 /** @brief Opaque reader handle. */
@@ -84,12 +88,40 @@ int as_reader_close(void *ctx);
 /**
  * @brief Destroys the reader and frees all resources.
  *
- * Joins the background scan thread before freeing. Does NOT close or destroy
- * the @c aerospike client — the caller owns it.
+ * Self-sufficient: closes the bridge channel (unblocking a scan thread stuck
+ * on a full channel), joins the background scan thread, drains and destroys
+ * any records that never reached a consumer, then frees the reader. Safe to
+ * call without a prior @ref as_reader_close. Does NOT close or destroy the
+ * @c aerospike client — the caller owns it.
  *
  * @param[in] r  Reader to destroy. No-op if @c NULL.
  */
 void as_reader_destroy(AerospikeReader *r);
+
+/* ------------------------------------------------------------------ *
+ * Diagnostics — safe to call only after @ref pipe_run has returned.  *
+ * ------------------------------------------------------------------ */
+
+/**
+ * @brief Reports whether the scan failed, copying the first error seen.
+ *
+ * @param[in]  r    Reader. May be @c NULL (returns 0).
+ * @param[out] out  Destination for the error. Untouched if no error was
+ *                  recorded. May be @c NULL if only the flag is needed.
+ * @return  @c 1 if the scan failed (transport or parse error), @c 0 otherwise.
+ *
+ * @note An early termination requested via @ref as_reader_close is not
+ *       counted as an error.
+ */
+int as_reader_error(AerospikeReader *r, as_error *out);
+
+/**
+ * @brief Number of records the scan produced (pushed into the pipeline).
+ *
+ * Useful as a migration checksum: on a clean run
+ * @c scanned == inserted + skipped + failed.
+ */
+uint64_t as_reader_scanned(AerospikeReader *r);
 
 /**
  * @brief @ref Reader.destroy_item implementation — wraps @c as_record_destroy.
